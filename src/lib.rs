@@ -1,5 +1,5 @@
 use std::marker::PhantomData;
-use std::hash::{Hash, Hasher};
+//use std::hash::{Hash, Hasher};
 use std::fmt::{Debug, Formatter};
 
 use cranelift_entity::EntityRef;
