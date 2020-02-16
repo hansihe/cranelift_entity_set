@@ -3,6 +3,8 @@ name = "cranelift_entity_set"
 version = "0.1.0"
 authors = ["Hans Elias B. Josephsen <me@hansihe.com>"]
 edition = "2018"
+license = "Apache-2.0 WITH LLVM-exception"
+description = "Pooled entity set implementation on top of cranelift_entity"
 
 [dependencies]
 cranelift-entity = "0.58"
