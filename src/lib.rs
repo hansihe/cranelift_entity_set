@@ -179,8 +179,8 @@ where
         }
     }
 
-    pub fn union(&mut self, other: &EntitySet<K>,
-                 pool: &mut EntitySetPool<K>) {
+    pub fn union_into(&mut self, other: &EntitySet<K>,
+                      pool: &mut EntitySetPool<K>) {
         let other_list = &other.list;
         let other_pages_len = other_list.len(&pool.pool);
         self.grow_to_pages(other_pages_len, pool);
@@ -193,14 +193,83 @@ where
         }
     }
 
+    pub fn union<'a>(&self, rhs: &EntitySet<K>, pool: &'a EntitySetPool<K>) -> impl Iterator<Item = K> + 'a {
+        self.union_other(rhs, pool, pool)
+    }
+
+    pub fn union_other<'a>(&self, rhs: &EntitySet<K>, pool: &'a EntitySetPool<K>, rhs_pool: &'a EntitySetPool<K>) -> impl Iterator<Item = K> + 'a {
+        self.join_other(rhs, pool, rhs_pool).map(|(k, _l, _r)| k)
+    }
+
+    pub fn intersection<'a>(&self, rhs: &EntitySet<K>, pool: &'a EntitySetPool<K>) -> impl Iterator<Item = K> + 'a {
+        self.intersection_other(rhs, pool, pool)
+    }
+
+    pub fn intersection_other<'a>(&self, rhs: &EntitySet<K>, pool: &'a EntitySetPool<K>, rhs_pool: &'a EntitySetPool<K>) -> impl Iterator<Item = K> + 'a {
+        self.join_other(rhs, pool, rhs_pool).filter_map(|(k, l, r)| {
+            if l && r {
+                Some(k)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn difference<'a>(&self, rhs: &EntitySet<K>, pool: &'a EntitySetPool<K>) -> impl Iterator<Item = K> + 'a {
+        self.difference_other(rhs, pool, pool)
+    }
+
+    pub fn difference_other<'a>(&self, rhs: &EntitySet<K>, pool: &'a EntitySetPool<K>, rhs_pool: &'a EntitySetPool<K>) -> impl Iterator<Item = K> + 'a {
+        self.join_other(rhs, pool, rhs_pool).filter_map(|(k, l, r)| {
+            if l && !r {
+                Some(k)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn symmetric_difference<'a>(&self, rhs: &EntitySet<K>, pool: &'a EntitySetPool<K>) -> impl Iterator<Item = K> + 'a {
+        self.symmetric_difference_other(rhs, pool, pool)
+    }
+
+    pub fn symmetric_difference_other<'a>(&self, rhs: &EntitySet<K>, pool: &'a EntitySetPool<K>, rhs_pool: &'a EntitySetPool<K>) -> impl Iterator<Item = K> + 'a {
+        self.join_other(rhs, pool, rhs_pool).filter_map(|(k, l, r)| {
+            if l != r {
+                Some(k)
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn iter<'a>(&self, pool: &'a EntitySetPool<K>) -> EntitySetIter<'a, K> {
         EntitySetIter {
             pool: &pool.pool,
             list: self.list.clone(),
             unused: PhantomData,
-            current_data: None,
+            current_data: 0,
             current: 0,
             finished: false,
+        }
+    }
+
+    pub fn join<'a>(&self, rhs: &EntitySet<K>, pool: &'a EntitySetPool<K>) -> EntitySetJoinIter<'a, K> {
+        self.join_other(rhs, pool, pool)
+    }
+
+    pub fn join_other<'a>(&self, rhs: &EntitySet<K>, pool: &'a EntitySetPool<K>, rhs_pool: &'a EntitySetPool<K>) -> EntitySetJoinIter<'a, K> {
+        let mut left = self.iter(pool);
+        let mut right = rhs.iter(rhs_pool);
+
+        let left_curr = left.next();
+        let right_curr = right.next();
+
+        EntitySetJoinIter {
+            left,
+            right,
+            left_curr,
+            right_curr,
         }
     }
 
@@ -297,7 +366,8 @@ pub struct EntitySetIter<'a, T> where T: EntityRef {
     pool: &'a ListPool<PooledSetValue>,
     list: EntityList<PooledSetValue>,
     unused: PhantomData<T>,
-    current_data: Option<PooledSetValue>,
+
+    current_data: usize,
     current: usize,
     finished: bool,
 }
@@ -306,22 +376,77 @@ impl<'a, T> Iterator for EntitySetIter<'a, T> where T: EntityRef {
     fn next(&mut self) -> Option<T> {
         loop {
             if self.finished { return None; }
-            let rem = self.current % 63;
+
+            let rem = (self.current % 63) as usize;
+
+            // If we are at a boundary, fetch next data point.
+            // If we are out of data points, then the iterator goes into it's
+            // finished terminal state.
             if rem == 0 {
-                self.current_data = self.list.get(self.current / 63, self.pool);
-                if self.current_data.is_none() {
+                let curr = self.list.get(self.current / 63, self.pool);
+                if curr.is_none() {
                     self.finished = true;
                     return None;
                 }
+                self.current_data = curr.unwrap().0 as usize;
             }
 
-            if (self.current_data.unwrap().0 & (1 << rem)) != 0 {
-                let ret = Some(T::new(self.current));
-                self.current += 1;
-                return ret;
-            } else {
-                self.current += 1;
+            let rem_inv = 63 - rem;
+            let trailing = self.current_data.trailing_zeros() as usize;
+
+            // If we exceeded the number of availible bits in the current data
+            // integer, we round to next boundary and skip to next iteration.
+            if trailing > rem_inv {
+                self.current += rem_inv;
+                continue;
             }
+
+            // The entity id we found
+            let num = self.current + trailing;
+
+            // Shift current data point and offset.
+            self.current_data = self.current_data >> (trailing + 1);
+            self.current = self.current + (trailing + 1);
+
+            return Some(T::new(num));
+        }
+    }
+}
+
+pub struct EntitySetJoinIter<'a, T> where T: EntityRef {
+    left: EntitySetIter<'a, T>,
+    right: EntitySetIter<'a, T>,
+
+    left_curr: Option<T>,
+    right_curr: Option<T>,
+}
+impl<'a, T> Iterator for EntitySetJoinIter<'a, T> where T: EntityRef {
+    type Item = (T, bool, bool);
+    fn next(&mut self) -> Option<Self::Item> {
+        match (self.left_curr.map(|v| v.index()), self.right_curr.map(|v| v.index())) {
+            (None, None) => None,
+            (Some(l), Some(r)) if l == r => {
+                self.left_curr = self.left.next();
+                self.right_curr = self.right.next();
+                Some((T::new(l), true, true))
+            },
+            (Some(l), Some(r)) if l < r => {
+                self.left_curr = self.left.next();
+                Some((T::new(l), true, false))
+            },
+            (Some(l), Some(r)) if l > r => {
+                self.right_curr = self.right.next();
+                Some((T::new(r), false, true))
+            },
+            (Some(_), Some(_)) => unreachable!(),
+            (Some(l), None) => {
+                self.left_curr = self.left.next();
+                Some((T::new(l), true, false))
+            },
+            (None, Some(r)) => {
+                self.right_curr = self.right.next();
+                Some((T::new(r), false, true))
+            },
         }
     }
 }
@@ -487,6 +612,35 @@ mod test {
         assert!(iter.next() == Some(TestEntity(512)));
         assert!(iter.next() == None);
         assert!(iter.next() == None);
+    }
+
+    #[test]
+    fn test_join() {
+        let mut pool = EntitySetPool::new();
+
+        let mut set1: EntitySet<TestEntity> = EntitySet::new();
+        let mut set2: EntitySet<TestEntity> = EntitySet::new();
+
+        set1.insert(TestEntity(5), &mut pool);
+        set1.insert(TestEntity(10), &mut pool);
+        set1.insert(TestEntity(11), &mut pool);
+        set1.insert(TestEntity(15), &mut pool);
+
+        set2.insert(TestEntity(2), &mut pool);
+        set2.insert(TestEntity(7), &mut pool);
+        set2.insert(TestEntity(10), &mut pool);
+        set2.insert(TestEntity(11), &mut pool);
+
+        let mut iter = set1.join(&set2, &pool);
+
+        assert!(iter.next() == Some((TestEntity(2), false, true)));
+        assert!(iter.next() == Some((TestEntity(5), true, false)));
+        assert!(iter.next() == Some((TestEntity(7), false, true)));
+        assert!(iter.next() == Some((TestEntity(10), true, true)));
+        assert!(iter.next() == Some((TestEntity(11), true, true)));
+        assert!(iter.next() == Some((TestEntity(15), true, false)));
+        assert!(iter.next() == None);
+
     }
 
 
