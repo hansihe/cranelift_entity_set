@@ -193,6 +193,23 @@ where
         }
     }
 
+    pub fn subtract_from(&mut self, other: &EntitySet<K>, pool: &mut EntitySetPool<K>) {
+        let other_list = &other.list;
+
+        let self_pages_len = self.list.len(&pool.pool);
+        let other_pages_len = other_list.len(&pool.pool);
+
+        let pages_to_iter = std::cmp::min(self_pages_len, other_pages_len);
+
+        for n in 0..pages_to_iter {
+            let other_val = other_list.get(n, &pool.pool).unwrap();
+            let val_mut = self.list.get_mut(n, &mut pool.pool).unwrap();
+            debug_assert!(val_mut.0 != std::u64::MAX);
+            debug_assert!(other_val.0 != std::u64::MAX);
+            val_mut.0 &= !other_val.0;
+        }
+    }
+
     pub fn union<'a>(&self, rhs: &EntitySet<K>, pool: &'a EntitySetPool<K>) -> impl Iterator<Item = K> + 'a {
         self.union_other(rhs, pool, pool)
     }
